@@ -5,12 +5,81 @@
 
 import argparse
 import os
+import shutil
 import sys
 from subprocess import check_call
 
 
 CUR_DIR = os.path.dirname(os.path.abspath(__file__))
 HARMONY_DIR = os.path.normpath(os.path.join(CUR_DIR, '..'))
+
+def resolve_hvigorw():
+    hvigorw_from_env = os.environ.get('HVIGORW')
+    if hvigorw_from_env:
+        return hvigorw_from_env
+    hvigorw_from_path = shutil.which('hvigorw')
+    if hvigorw_from_path:
+        return hvigorw_from_path
+    raise Exception('hvigorw not found in PATH or HVIGORW env')
+
+def is_valid_harmony_sdk_path(sdk_path):
+    if not sdk_path:
+        return False
+    return (
+        os.path.isdir(sdk_path)
+        and os.path.isdir(os.path.join(sdk_path, 'hms'))
+        and os.path.isdir(os.path.join(sdk_path, 'openharmony'))
+    )
+
+def resolve_harmony_sdk_path():
+    candidates = []
+    harmony_home = os.environ.get('HARMONY_HOME')
+    if harmony_home:
+        candidates.append(harmony_home)
+        candidates.append(os.path.join(harmony_home, 'default'))
+
+    for candidate in candidates:
+        candidate = os.path.normpath(candidate)
+        if is_valid_harmony_sdk_path(candidate):
+            return candidate
+    return None
+
+def resolve_deveco_sdk_home(harmony_sdk_path):
+    deveco_sdk_home = os.environ.get('DEVECO_SDK_HOME')
+    if deveco_sdk_home and os.path.isdir(os.path.join(deveco_sdk_home, 'default')):
+        return os.path.normpath(deveco_sdk_home)
+    if harmony_sdk_path and os.path.basename(harmony_sdk_path) == 'default':
+        return os.path.dirname(harmony_sdk_path)
+    return None
+
+def read_hwsdk_dir(local_properties_path):
+    if not os.path.exists(local_properties_path):
+        return None
+    with open(local_properties_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith('hwsdk.dir='):
+                return line[len('hwsdk.dir='):]
+    return None
+
+def ensure_local_properties():
+    local_properties_path = os.path.join(HARMONY_DIR, 'local.properties')
+    hwsdk_dir = read_hwsdk_dir(local_properties_path)
+    if is_valid_harmony_sdk_path(hwsdk_dir):
+        return hwsdk_dir
+
+    harmony_sdk_path = resolve_harmony_sdk_path()
+    if not harmony_sdk_path:
+        print('harmony/local.properties not found or invalid, and no valid Harmony SDK path was found.')
+        return None
+
+    if hwsdk_dir:
+        print('harmony/local.properties has invalid hwsdk.dir {}, rewrite it with {}'.format(hwsdk_dir, harmony_sdk_path))
+    else:
+        print('harmony/local.properties not found, write hwsdk.dir with {} to it'.format(harmony_sdk_path))
+    with open(local_properties_path, 'w') as f:
+        f.write('hwsdk.dir={}'.format(harmony_sdk_path))
+    return harmony_sdk_path
 
 def patch_oh_package(module_path, version):
     cmd = 'ohpm version {}'.format(version)
@@ -36,22 +105,29 @@ def run_package_har(module_name, module_path, verbose):
     if verbose:
         print(f'===== start run package {module_name} =====')
 
-    local_properties_path = os.path.join(HARMONY_DIR, 'local.properties')
-    if not os.path.exists(local_properties_path):
-        print('harmony/local.properties not found')
-        if 'HARMONY_HOME' in os.environ:
-            # write hwsdk.dir to local.properties
-            harmony_sdk_path = os.environ['HARMONY_HOME']
-            print('harmony/local.properties not found, write hwsdk.dir with {} to it'.format(harmony_sdk_path))
-            with open(local_properties_path, 'w') as f:
-                f.write('hwsdk.dir={}'.format(harmony_sdk_path))
-        else:
-            print('harmony/local.properties not found, and HARMONY_HOME is not set.')
+    harmony_sdk_path = ensure_local_properties()
 
-    cmd = f'hvigorw assembleHar --mode module -p module={module_name}@default -p product=default -p buildMode=debug --no-daemon'
+    hvigorw = resolve_hvigorw()
+    cmd = [
+        hvigorw,
+        'assembleHar',
+        '--mode',
+        'module',
+        '-p',
+        f'module={module_name}@default',
+        '-p',
+        'product=default',
+        '-p',
+        'buildMode=debug',
+        '--no-daemon'
+    ]
     if verbose:
-        print(f'run command {cmd}')
-    check_call(cmd, shell=True, cwd=HARMONY_DIR)
+        print(f'run command {" ".join(cmd)}')
+    env = os.environ.copy()
+    deveco_sdk_home = resolve_deveco_sdk_home(harmony_sdk_path)
+    if deveco_sdk_home:
+        env['DEVECO_SDK_HOME'] = deveco_sdk_home
+    check_call(cmd, cwd=HARMONY_DIR, env=env)
     # as even hvigor build failed, it still return value 0, so we need to check har file exist or not
     har_path = os.path.join(HARMONY_DIR, module_path, 'build', 'default', 'outputs', 'default', f'{module_name}.har')
     print(f'har_path is {har_path}')
